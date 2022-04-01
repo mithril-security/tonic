@@ -8,6 +8,7 @@ use futures_util::{future, ready};
 use http::StatusCode;
 use http_body::Body;
 use std::{
+    mem,
     fmt,
     pin::Pin,
     task::{Context, Poll},
@@ -15,6 +16,7 @@ use std::{
 use tracing::{debug, trace};
 
 const BUFFER_SIZE: usize = 8 * 1024;
+const MAX_MESSAGE_SIZE: usize = 150;
 
 /// Streaming requests and responses.
 ///
@@ -23,6 +25,7 @@ const BUFFER_SIZE: usize = 8 * 1024;
 pub struct Streaming<T> {
     decoder: Box<dyn Decoder<Item = T, Error = Status> + Send + Sync + 'static>,
     body: BoxBody,
+    content_size: Option<usize>,
     state: State,
     direction: Direction,
     buf: BytesMut,
@@ -64,6 +67,7 @@ impl<T> Streaming<T> {
             decoder,
             body,
             Direction::Response(status_code),
+            None,                               //content-size for responses, None set to ignore size of responses
             #[cfg(feature = "compression")]
             encoding,
         )
@@ -79,6 +83,7 @@ impl<T> Streaming<T> {
             decoder,
             body,
             Direction::EmptyResponse,
+            None,                               //content-size
             #[cfg(feature = "compression")]
             None,
         )
@@ -88,6 +93,7 @@ impl<T> Streaming<T> {
     pub fn new_request<B, D>(
         decoder: D,
         body: B,
+        content_size: Option<usize>,
         #[cfg(feature = "compression")] encoding: Option<CompressionEncoding>,
     ) -> Self
     where
@@ -99,6 +105,7 @@ impl<T> Streaming<T> {
             decoder,
             body,
             Direction::Request,
+            content_size,
             #[cfg(feature = "compression")]
             encoding,
         )
@@ -108,6 +115,7 @@ impl<T> Streaming<T> {
         decoder: D,
         body: B,
         direction: Direction,
+        content_size: Option<usize>,
         #[cfg(feature = "compression")] encoding: Option<CompressionEncoding>,
     ) -> Self
     where
@@ -121,6 +129,7 @@ impl<T> Streaming<T> {
                 .map_data(|mut buf| buf.copy_to_bytes(buf.remaining()))
                 .map_err(|err| Status::map_error(err.into()))
                 .boxed(),
+            content_size,
             state: State::ReadHeader,
             direction,
             buf: BytesMut::with_capacity(BUFFER_SIZE),
@@ -298,6 +307,7 @@ impl<T> Stream for Streaming<T> {
     type Item = Result<T, Status>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut length = 0;
         loop {
             // FIXME: implement the ability to poll trailers when we _know_ that
             // the consumer of this stream will only poll for the first message.
@@ -318,7 +328,17 @@ impl<T> Stream for Streaming<T> {
             };
 
             if let Some(data) = chunk {
-                self.buf.put(data);
+                length += data.len();
+                if self.content_size == None || length <= self.content_size.unwrap() {      //None for responses from the server
+                    self.buf.put(data)
+                }
+                else {
+                    self.buf.clear();
+                    return Poll::Ready(Some(Err(Status::new(
+                        Code::InvalidArgument,
+                        "Message larger than specified content size/length".to_string(),
+                    ))));
+                }
             } else {
                 // FIXME: improve buf usage.
                 if self.buf.has_remaining() {
