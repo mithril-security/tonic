@@ -8,7 +8,6 @@ use futures_util::{future, ready};
 use http::StatusCode;
 use http_body::Body;
 use std::{
-    mem,
     fmt,
     pin::Pin,
     task::{Context, Poll},
@@ -16,7 +15,6 @@ use std::{
 use tracing::{debug, trace};
 
 const BUFFER_SIZE: usize = 8 * 1024;
-const MAX_MESSAGE_SIZE: usize = 150;
 
 /// Streaming requests and responses.
 ///

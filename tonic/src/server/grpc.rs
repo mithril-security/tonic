@@ -22,6 +22,7 @@ macro_rules! t {
     };
 }
 
+
 /// A gRPC Server handler.
 ///
 /// This will wrap some inner [`Codec`] and provide utilities to handle
@@ -33,6 +34,8 @@ macro_rules! t {
 /// implements some [`Body`].
 pub struct Grpc<T> {
     codec: T,
+    /// Field added to set a max message size to prevent accepting overly large messages
+    max_message_size: Option<usize>, 
     /// Which compression encodings does the server accept for requests?
     #[cfg(feature = "compression")]
     accept_compression_encodings: EnabledCompressionEncodings,
@@ -50,6 +53,7 @@ where
     pub fn new(codec: T) -> Self {
         Self {
             codec,
+            max_message_size: Some(1000),         //This should just be some call to retrieve the max_message_size value from the Server struct
             #[cfg(feature = "compression")]
             accept_compression_encodings: EnabledCompressionEncodings::default(),
             #[cfg(feature = "compression")]
@@ -183,7 +187,7 @@ where
         );
 
         let request = match self.map_request_unary(req).await {
-            Ok(r) => r,
+            Ok(r) => r, 
             Err(status) => {
                 return self
                     .map_response::<stream::Once<future::Ready<Result<T::Encode, Status>>>>(
@@ -332,34 +336,48 @@ where
         B: Body + Send + Sync + 'static,
         B::Error: Into<crate::Error> + Send,
     {
-        #[cfg(feature = "compression")]
-        let request_compression_encoding = self.request_encoding_if_supported(&request)?;
+        if request.headers().contains_key("content-size")
+        {   
+            #[cfg(feature = "compression")]
+            let request_compression_encoding = self.request_encoding_if_supported(&request)?;
+            
+            let (parts, body) = request.into_parts();
+            let content_size = parts.headers["content-size"].to_str().unwrap();      //.parse::<usize>().unwrap());
 
-        let (parts, body) = request.into_parts();
+            if content_size.parse::<usize>().is_ok() && content_size.parse::<usize>().unwrap() <= self.max_message_size.unwrap()
+            {
+                #[cfg(feature = "compression")]
+                let stream =
+                    Streaming::new_request(self.codec.decoder(), body, Some(content_size.parse::<usize>().unwrap()), request_compression_encoding);
+                
+                #[cfg(not(feature = "compression"))]
+                let stream = Streaming::new_request(self.codec.decoder(), body, Some(content_size.parse::<usize>().unwrap()));
+                
+                futures_util::pin_mut!(stream);
 
-        #[cfg(feature = "compression")]
-        let stream =
-            Streaming::new_request(self.codec.decoder(), body, request_compression_encoding);
+                let message = stream
+                    .try_next()
+                    .await?
+                    .ok_or_else(|| Status::new(Code::Internal, "Missing request message."))?;
 
-        #[cfg(not(feature = "compression"))]
-        let stream = Streaming::new_request(self.codec.decoder(), body);
+                let mut req = Request::from_http_parts(parts, message);
 
-        futures_util::pin_mut!(stream);
+                if let Some(trailers) = stream.trailers().await? {
+                    req.metadata_mut().merge(trailers);
+                }
 
-        let message = stream
-            .try_next()
-            .await?
-            .ok_or_else(|| Status::new(Code::Internal, "Missing request message."))?;
-
-        let mut req = Request::from_http_parts(parts, message);
-
-        if let Some(trailers) = stream.trailers().await? {
-            req.metadata_mut().merge(trailers);
+                Ok(req)
+            }
+            else {
+                Err(Status::new(Code::InvalidArgument, "Message too large or Content-size invalid"))
+            }
         }
-
-        Ok(req)
+        else {
+            Err(Status::new(Code::InvalidArgument, "Message too large or Content-size invalid"))
+        }
     }
 
+    /// Probably needs more testing
     fn map_request_streaming<B>(
         &mut self,
         request: http::Request<B>,
@@ -368,17 +386,35 @@ where
         B: Body + Send + Sync + 'static,
         B::Error: Into<crate::Error> + Send,
     {
-        #[cfg(feature = "compression")]
-        let encoding = self.request_encoding_if_supported(&request)?;
+        if request.headers().contains_key("content-size")
+        {
+            #[cfg(feature = "compression")]
+            let encoding = self.request_encoding_if_supported(&request)?;
 
-        #[cfg(feature = "compression")]
-        let request =
-            request.map(|body| Streaming::new_request(self.codec.decoder(), body, encoding));
+            let (parts,body) = request.into_parts();
+            let content_size = parts.headers["content-size"].to_str().unwrap();
+            
+            if content_size.parse::<usize>().is_ok() && content_size.parse::<usize>().unwrap() <= self.max_message_size.unwrap()
+            {
+                #[cfg(feature = "compression")]
+                let  stream = Streaming::new_request(self.codec.decoder(), body, Some(content_size.parse::<usize>().unwrap()), encoding);
+                
+                #[cfg(not(feature = "compression"))]
+                let  stream = Streaming::new_request(self.codec.decoder(), body, Some(content_size.parse::<usize>().unwrap()));
+                
+                let request = http::Request::from_parts(parts,stream);
 
-        #[cfg(not(feature = "compression"))]
-        let request = request.map(|body| Streaming::new_request(self.codec.decoder(), body));
-
-        Ok(Request::from_http(request))
+                let req = Request::from_http(request);
+                
+                Ok(req)
+            }
+            else {
+                Err(Status::new(Code::InvalidArgument, "Message too large or Content-size invalid"))        
+            }
+        }
+        else {
+            Err(Status::new(Code::InvalidArgument, "Message too large or Content-size invalid"))
+        }
     }
 
     fn map_response<B>(

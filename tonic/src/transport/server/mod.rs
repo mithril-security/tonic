@@ -83,6 +83,7 @@ pub struct Server<L = Identity> {
     http2_keepalive_interval: Option<Duration>,
     http2_keepalive_timeout: Option<Duration>,
     max_frame_size: Option<u32>,
+    max_message_size: Option<usize>,
     accept_http1: bool,
     layer: L,
 }
@@ -151,6 +152,11 @@ impl Server {
 }
 
 impl<L> Server<L> {
+    /// Return max message size set for server
+    pub fn get_max_message_size(self) -> Option<usize> {
+        self.max_message_size
+    }
+    
     /// Configure TLS for this server.
     #[cfg(feature = "tls")]
     #[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
@@ -291,6 +297,17 @@ impl<L> Server<L> {
     pub fn max_frame_size(self, frame_size: impl Into<Option<u32>>) -> Self {
         Server {
             max_frame_size: frame_size.into(),
+            ..self
+        }
+    }
+
+    /// Sets the maximum message size to use for Tonic.
+    ///
+    /// Passing `None` will do nothing.
+    ///
+    pub fn max_message_size(self, message_size: impl Into<Option<usize>>) -> Self {
+        Server {
+            max_message_size: message_size.into(),
             ..self
         }
     }
@@ -445,6 +462,7 @@ impl<L> Server<L> {
             http2_keepalive_interval: self.http2_keepalive_interval,
             http2_keepalive_timeout: self.http2_keepalive_timeout,
             max_frame_size: self.max_frame_size,
+            max_message_size: self.max_message_size,
             accept_http1: self.accept_http1,
         }
     }
