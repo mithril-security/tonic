@@ -16,7 +16,6 @@ use std::{
 use tracing::{debug, trace};
 
 const BUFFER_SIZE: usize = 8 * 1024;
-const MAX_MESSAGE_SIZE: usize = 150;
 
 /// Streaming requests and responses.
 ///
