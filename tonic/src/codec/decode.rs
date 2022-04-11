@@ -327,7 +327,8 @@ impl<T> Stream for Streaming<T> {
 
             if let Some(data) = chunk {
                 length += data.len();
-                if self.content_size == None || length <= self.content_size.unwrap() {      //None for responses from the server
+                //None for responses from the server and '8' bytes for the headers tonic adds 
+                if self.content_size == None || length <= self.content_size.unwrap() + 8 {
                     self.buf.put(data)
                 }
                 else {
